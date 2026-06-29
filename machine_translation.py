@@ -4,17 +4,18 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from torch.nn.utils.rnn import pad_sequence
 from datasets import load_dataset
-from torchtext.vocab import build_vocab_from_iterator
+import re
 import random
 from collections import Counter
 
-data = load_dataset("opus_books", "en-fr")
-train_data = data["train"]
+data = load_dataset("Helsinki-NLP/opus-100", "en-es")
+
+train_data = data["train"].select(range(20000))
 train_texts = [item["translation"]["en"] for item in train_data]
-train_labels = [item["translation"]["fr"] for item in train_data]
+train_labels = [item["translation"]["es"] for item in train_data]
 
 def tokenize(text):
-    return text.lower().split()
+    return re.findall(r"\w+|[^\w\s]", text.lower())
 
 tokenized_en = [tokenize(t) for t in train_texts]
 tokenized_fr = [tokenize(t) for t in train_labels]
@@ -44,7 +45,7 @@ max_len = 60
 
 def encode_src(tokens):
     tokens = tokens[:max_len]
-    ids =  [src_vocab.get(t, src_vocab["<unk>"]) for t in tokens]
+    ids =  [src_vocab.get(t, src_vocab["<unk>"]) for t in tokens] 
     return torch.tensor(ids, dtype = torch.long)
 
 def encode_tgt(tokens):
@@ -139,7 +140,7 @@ class PositionalEncoding(nn.Module):
         pe = torch.zeros(seq_len,d_model)
          # create a vector of shape (seq_len,1)
         position = torch.arange(0, seq_len, dtype = torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float()*(-math.log(1000.0)/d_model)) #torch.arange(0, d_model, 2) . creates a 1-D tensor starting at 0, stopping before d_model, stepping by 2, 
+        div_term = torch.exp(torch.arange(0, d_model, 2).float()*(-math.log(10000.0)/d_model)) #torch.arange(0, d_model, 2) . creates a 1-D tensor starting at 0, stopping before d_model, stepping by 2, 
 
         #apply sin to even positions
         
@@ -157,16 +158,16 @@ class PositionalEncoding(nn.Module):
     
 class LayerNormalization(nn.Module):
     
-    def __init__(self, esp: float = 10*-6):
+    def __init__(self, eps: float = 1e-6):
         super().__init__()
-        self.esp = esp
+        self.eps = eps
         self.alpha = nn.Parameter(torch.ones(1))
         self.bias = nn.Parameter(torch.zeros(1))
         
     def forward(self,x):
         mean = x.mean(dim=-1, keepdim = True)
         std = x.std(dim = -1, keepdim = True)
-        return self.alpha * (x-mean) / (std + self.esp)  + self.bias
+        return self.alpha * (x-mean) / (std + self.eps)  + self.bias
         
 class FeedForward(nn.Module):
     def __init__(self, d_model:int, d_ff:int, dropout : float):
@@ -339,7 +340,7 @@ class ProjectionLayer(nn.Module):
     def forward(self,x):
         #(batch, seq_len, d_model) --> (batch, seq_ln, vocab_size)
         
-        return torch.log_softmax(self.proj(x),dim = -1)       
+        return self.proj(x)     
         
 class Transformer(nn.Module):
     
@@ -424,15 +425,15 @@ def create_tgt_mask(tgt, pad_idx):
     device = tgt.device
     batch, tgt_len = tgt.shape
 
-    # 1️⃣ Padding mask: ignore pad tokens
+    # 1️ Padding mask: ignore pad tokens
     pad_mask = (tgt != pad_idx).unsqueeze(1).unsqueeze(2)  # shape: (B, 1, 1, tgt_len)
 
-    # 2️⃣ Causal (look-ahead) mask: prevent looking at future tokens
-    # torch.tril, not trill 😅
+   
+    
     causal_mask = torch.tril(torch.ones((tgt_len, tgt_len), device=device)).bool()  # shape: (tgt_len, tgt_len)
     causal_mask = causal_mask.unsqueeze(0).unsqueeze(1)  # (1,1,tgt_len,tgt_len)
 
-    # 3️⃣ Combine padding & causal masks
+    # 3️ Combine padding & causal masks
     return pad_mask & causal_mask  # shape: (B,1,tgt_len,tgt_len)
 
 
@@ -443,42 +444,105 @@ def get_model(src_vocab_size, tgt_vocab_size):
 def train_model():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"using device {device}")
-    model = get_model(len(src_vocab), len(tgt_vocab)).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    model     = get_model(len(src_vocab), len(tgt_vocab)).to(device)
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=5e-4,           # ← reduced
+        betas=(0.9, 0.98),
+        eps=1e-9
+    )
     criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
     
-    for epoch in range(10):
+    for epoch in range(50):
         model.train()
+        epoch_loss = 0
+        n_batches  = 0
         
         for batch in dataloader:
-            print("PRIINT")
-            src = batch["src"].to(device)
+            src    = batch["src"].to(device)
             tgt_in = batch["tgt_input"].to(device)
-            tgt_out = batch["tgt_output"].to(device)
+            tgt_out= batch["tgt_output"].to(device)
             
-            src_mask = create_src_mask(src,pad_idx).to(device)
-            
+            src_mask = create_src_mask(src, pad_idx).to(device)
             tgt_mask = create_tgt_mask(tgt_in, pad_idx).to(device)
             
-            enc_out = model.encode(src,src_mask)
-            print("ENCODED")
-            dec_out = model.decode(enc_out, tgt_in,src_mask, tgt_mask)
-            output = model.project(dec_out)
+            enc_out = model.encode(src, src_mask)
+            dec_out = model.decode(enc_out, tgt_in, src_mask, tgt_mask)
+            output  = model.project(dec_out)
             
-            output = output.reshape(-1,output.size(-1))
-            
+            output  = output.reshape(-1, output.size(-1))
             tgt_out = tgt_out.reshape(-1)
             
             loss = criterion(output, tgt_out)
             
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # ← key fix
             optimizer.step()
             
-        print(f"Epoch {epoch+1} | Loss = {loss.item():.4f}")
+            epoch_loss += loss.item()
+            n_batches  += 1
+        
+        # Print AVERAGE epoch loss, not just last batch loss
+        avg_loss = epoch_loss / n_batches
+        print(f"Epoch {epoch+1} | Avg Loss = {avg_loss:.4f}")
+    
+    return model
    
-train_model()    
+model = train_model()    
      
     
+def translate(sentence: str, model, src_vocab, tgt_vocab, 
+              max_len=60, device="cpu") -> str:
+    """Translate a sentence from English to French."""
+    model.eval()
+    
+    # Reverse tgt_vocab to get id → word mapping
+    idx2tgt = {v: k for k, v in tgt_vocab.items()}
+    
+    # Tokenize and encode source
+    tokens     = tokenize(sentence)
+    src_ids    = encode_src(tokens).unsqueeze(0).to(device)  # (1, seq_len)
+    src_mask   = create_src_mask(src_ids, pad_idx)
+    
+    # Encode source
+    with torch.no_grad():
+        enc_out = model.encode(src_ids, src_mask)
+    
+    # Start decoder with <sos>
+    tgt_ids = torch.tensor([[tgt_vocab["<sos>"]]], 
+                            dtype=torch.long).to(device)
+    
+    output_tokens = []
+    
+    for _ in range(max_len):
+        tgt_mask = create_tgt_mask(tgt_ids, pad_idx)
+        
+        with torch.no_grad():
+            dec_out = model.decode(enc_out, tgt_ids, src_mask, tgt_mask)
+            logits  = model.project(dec_out)         # (1, seq_len, vocab_size)
+            next_id = logits[:, -1, :].argmax(dim=-1) # take last position
+            
+        print(
+    "Predicted id:", next_id.item(),
+    "Token:", idx2tgt.get(next_id.item())
+)
+        
+        next_token = idx2tgt.get(next_id.item(), "<unk>")
+        
+        
+        if next_token == "<eos>":
+            break
+        
+        output_tokens.append(next_token)
+        tgt_ids = torch.cat([tgt_ids, next_id.unsqueeze(0)], dim=1)
+    
+    return " ".join(output_tokens)
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+input_sentence = input("Enter the sentence you want to translate    ")
+
+print("\n Translated output is ",translate(input_sentence, model, src_vocab, tgt_vocab, device=device))
 
 
