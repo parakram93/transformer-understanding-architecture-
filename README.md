@@ -20,7 +20,7 @@ An Encoder-Decoder Transformer trained for English-to-French machine translation
 
 ---
 
-### 2. Vanilla Transformer (`vanilla_transformer.py`)
+### 2.Sentiment analysis using Vanilla Transformer (`sentiment_analysis_vanilla_transformer.py`)
 
 A Transformer built from scratch and applied to sentiment classification on the IMDB dataset.
 
